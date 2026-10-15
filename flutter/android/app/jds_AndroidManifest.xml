@@ -23,4 +23,19 @@
 
     <!-- Alternative screen capture authorisation route -->
     <uses-permission android:name="android.permission.CAPTURE_VIDEO_OUTPUT" />
+
+    <application>
+        <!-- JDS: provisioning receiver, declared here (not registered in MainService) so the
+             PROVISION broadcast cold starts RustDesk even when nothing is running. The sender
+             must hold the signature level permission, so only the platform signed Sheriff agent
+             can provision - not any app on the device -->
+        <receiver
+            android:name="com.carriez.flutter_hbb.JdsProvisioning"
+            android:exported="true"
+            android:permission="io.jdslab.sheriff.permission.PROVISION">
+            <intent-filter>
+                <action android:name="com.carriez.flutter_hbb.PROVISION" />
+            </intent-filter>
+        </receiver>
+    </application>
 </manifest>
