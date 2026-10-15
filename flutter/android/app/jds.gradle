@@ -1,0 +1,54 @@
+// JDS: sign every build (debug and release) with the device platform key.
+// Applied at the very end of build.gradle (apply from: 'jds.gradle'), so it adds to upstream's
+// android { } block and overrides its release signing, without editing upstream's lines.
+// Signing values come from local.properties (local dev, not committed) or, when that's absent
+// (e.g. CI), the PLATFORM_* environment variables. With neither, the build is left unsigned
+// instead of failing.
+
+def platformSigningProperties = new java.util.Properties()
+def platformSigningFile = rootProject.file('local.properties')
+if (platformSigningFile.exists()) {
+    platformSigningFile.withInputStream { platformSigningProperties.load(it) }
+}
+
+// local.properties first, then the matching environment variable
+def signingValue = { propKey, envKey ->
+    platformSigningProperties.getProperty(propKey) ?: System.getenv(envKey)
+}
+
+def keystorePath = signingValue('platformKeystore', 'PLATFORM_KEYSTORE')
+def keystoreFile = keystorePath ? file(keystorePath) : null
+
+if (keystoreFile != null && keystoreFile.exists()) {
+    android {
+        signingConfigs {
+            platform {
+                storeFile keystoreFile
+                storePassword signingValue('platformKeystorePassword', 'PLATFORM_KEYSTORE_PASSWORD')
+                keyAlias signingValue('platformKeyAlias', 'PLATFORM_KEY_ALIAS')
+                keyPassword signingValue('platformKeyPassword', 'PLATFORM_KEY_PASSWORD')
+            }
+        }
+
+        buildTypes {
+            release {
+                signingConfig signingConfigs.platform
+            }
+
+            debug {
+                signingConfig signingConfigs.platform
+            }
+        }
+    }
+} else {
+    println "JDS: no platform keystore (local.properties / PLATFORM_KEYSTORE); building unsigned"
+}
+
+// JDS: extra permissions live in jds_AndroidManifest.xml and are merged into RustDesk's main
+// manifest as the build type manifest, so src/main/AndroidManifest.xml stays unedited. This
+// replaces the stock src/debug and src/profile manifests, which only add INTERNET (main has it)
+android {
+    sourceSets.matching { it.name in ['debug', 'profile', 'release'] }.configureEach {
+        manifest.srcFile 'jds_AndroidManifest.xml'
+    }
+}
