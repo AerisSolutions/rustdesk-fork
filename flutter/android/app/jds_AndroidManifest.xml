@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- JDS: extra permissions for the platform-signed build. jds.gradle uses this as the debug /
+     profile / release build type manifest, so Gradle merges it into RustDesk's
+     src/main/AndroidManifest.xml without editing that file. It stands in for the stock
+     src/debug and src/profile manifests, which only add INTERNET (already in main) -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.carriez.flutter_hbb">
+
+    <!-- Global key / scroll injection, see JdsInput -->
+    <uses-permission android:name="android.permission.INJECT_EVENTS" />
+
+    <!-- Enable accessibility and update protected settings -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+
+    <!-- Grant runtime permissions through setup code -->
+    <uses-permission android:name="android.permission.GRANT_RUNTIME_PERMISSIONS" />
+
+    <!-- Configure AppOps: PROJECT_MEDIA, overlays, all files access, and restricted settings -->
+    <uses-permission android:name="android.permission.MANAGE_APP_OPS_MODES" />
+
+    <!-- Manage the Android battery optimisation whitelist -->
+    <uses-permission android:name="android.permission.DEVICE_POWER" />
+
+    <!-- Alternative screen capture authorisation route -->
+    <uses-permission android:name="android.permission.CAPTURE_VIDEO_OUTPUT" />
+</manifest>
