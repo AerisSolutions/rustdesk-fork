@@ -40,6 +40,7 @@ import 'desktop/pages/view_camera_page.dart' as desktop_view_camera;
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'models/model.dart';
 import 'models/platform_model.dart';
+import 'jds_ticket.dart';
 
 import 'package:flutter_hbb/native/win32.dart'
     if (dart.library.html) 'package:flutter_hbb/web/win32.dart';
@@ -2389,6 +2390,12 @@ bool handleUriLink({List<String>? cmdArgs, Uri? uri, String? uriString}) {
 }
 
 List<String>? urlLinkToCmdArgs(Uri uri) {
+  // JDS: Sheriff Remote Control ticket, see jds_ticket.dart
+  if (uri.authority == kJdsTicketAuthority) {
+    jdsConnectWithTicket(uri);
+    return []; // empty = "handled": RustDesk just brings its window to the front
+  }
+
   String? command;
   String? id;
   final options = [
