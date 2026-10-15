@@ -171,7 +171,9 @@ class MainService : Service() {
                 stopCapture()
             }
             "half_scale" -> {
-                val halfScale = arg1.toBoolean()
+                // Rust sends its own decision when a session's video starts; Sheriff's per session
+                // choice (if one was made) takes priority over it
+                val halfScale = JdsHalfScale.choice ?: arg1.toBoolean()
                 if (isHalfScale != halfScale) {
                     isHalfScale = halfScale
                     updateScreenInfo(resources.configuration.orientation)
@@ -255,12 +257,16 @@ class MainService : Service() {
             ?: applicationContext.filesDir.absolutePath
         FFI.startServer(configPath, homePath, "")
 
+        // JDS: Sheriff's per session Full / Half choice, see JdsHalfScale
+        JdsHalfScale.register(this)
+
         createForegroundNotification()
     }
 
     override fun onDestroy() {
         checkMediaPermission()
         stopService(Intent(this, FloatingWindowService::class.java))
+        JdsHalfScale.unregister(this)
         super.onDestroy()
     }
 
