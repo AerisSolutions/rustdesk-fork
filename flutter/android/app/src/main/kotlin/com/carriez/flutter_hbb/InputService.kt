@@ -78,6 +78,12 @@ class InputService : AccessibilityService() {
             get() = ctx != null
     }
 
+    // JDS: global key injection and mouse wheel (platform signed perms), see JdsSignedInput
+    private val jdsSignedInput: JdsSignedInput by lazy { JdsSignedInput(applicationContext) }
+
+    // JDS: Android 11 root input fallback, see JdsRootInput
+    private val jdsRootInput = JdsRootInput()
+
     private fun notifyInputState() {
         val inputState = isOpen.toString()
         Handler(Looper.getMainLooper()).post {
@@ -134,6 +140,17 @@ class InputService : AccessibilityService() {
                     isWaitingLongPress = false
                 }
             }
+        }
+
+        // JDS: Android 11 root input fallback, see JdsRootInput.handleMouse
+        if (jdsRootInput.handleMouse(mask, mouseX, mouseY)) {
+            return
+        }
+
+        // JDS: mouse wheel arrives as mask == 3, see JdsSignedInput.handleWheel
+        if (mask == 3) {
+            jdsSignedInput.handleWheel(_x, _y, mouseX, mouseY)
+            return
         }
 
         // left button down, was up
@@ -271,6 +288,13 @@ class InputService : AccessibilityService() {
 
     @RequiresApi(Build.VERSION_CODES.N)
     fun onTouchInput(mask: Int, _x: Int, _y: Int) {
+        // JDS: Android 11 root input fallback, see JdsRootInput.handleTouch
+        jdsRootInput.handleTouch(mask, _x, _y, mouseX, mouseY)?.let {
+            mouseX = it[0]
+            mouseY = it[1]
+            return
+        }
+
         when (mask) {
             TOUCH_PAN_UPDATE -> {
                 mouseX -= _x * SCREEN_INFO.scale
@@ -475,6 +499,11 @@ class InputService : AccessibilityService() {
             } else if (tryHandlePowerKeyEvent(event)) {
                 return
             }
+        }
+
+        // JDS: global key injection (INJECT_EVENTS), see JdsSignedInput.tryInjectKey
+        if (jdsSignedInput.tryInjectKey(keyEvent, ke, textToCommit)) {
+            return
         }
 
         if (Build.VERSION.SDK_INT >= 33) {
@@ -775,6 +804,7 @@ class InputService : AccessibilityService() {
         super.onServiceConnected()
         ctx = this
         notifyInputState()
+        jdsSignedInput.onServiceConnected(logTag)
         val info = AccessibilityServiceInfo()
         if (Build.VERSION.SDK_INT >= 33) {
             info.flags = FLAG_INPUT_METHOD_EDITOR or FLAG_RETRIEVE_INTERACTIVE_WINDOWS
