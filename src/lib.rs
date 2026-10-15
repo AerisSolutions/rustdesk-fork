@@ -47,6 +47,9 @@ mod auth_2fa;
 mod clipboard;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod core_main;
+// JDS: native provisioning calls, see jds_ffi.rs
+#[cfg(target_os = "android")]
+mod jds_ffi;
 mod custom_server;
 mod lang;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
