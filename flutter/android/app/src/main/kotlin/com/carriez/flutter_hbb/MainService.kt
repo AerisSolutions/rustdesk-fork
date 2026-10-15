@@ -260,6 +260,9 @@ class MainService : Service() {
         // JDS: Sheriff's per session Full / Half choice, see JdsHalfScale
         JdsHalfScale.register(this)
 
+        // JDS: listen for the Sheriff agent's provisioning broadcast, see JdsProvisioning
+        JdsProvisioning.register(this)
+
         createForegroundNotification()
     }
 
@@ -267,6 +270,7 @@ class MainService : Service() {
         checkMediaPermission()
         stopService(Intent(this, FloatingWindowService::class.java))
         JdsHalfScale.unregister(this)
+        JdsProvisioning.unregister(this)
         super.onDestroy()
     }
 
