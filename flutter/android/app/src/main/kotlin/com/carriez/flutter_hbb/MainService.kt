@@ -238,6 +238,9 @@ class MainService : Service() {
     private lateinit var notificationChannel: String
     private lateinit var notificationBuilder: NotificationCompat.Builder
 
+    // JDS: boot time screen capture request with retries, see JdsProjectionRetry
+    private val jdsProjectionRetry = JdsProjectionRetry(logTag, { mediaProjection != null || _isReady }) { requestMediaProjection() }
+
     override fun onCreate() {
         super.onCreate()
         Log.d(logTag,"MainService onCreate, sdk int:${Build.VERSION.SDK_INT} reuseVirtualDisplay:$reuseVirtualDisplay")
@@ -264,6 +267,7 @@ class MainService : Service() {
     }
 
     override fun onDestroy() {
+        jdsProjectionRetry.cancel()
         checkMediaPermission()
         stopService(Intent(this, FloatingWindowService::class.java))
         JdsHalfScale.unregister(this)
@@ -364,7 +368,8 @@ class MainService : Service() {
                 replaceMediaProjection(mediaProjectionManager, it)
             } ?: let {
                 Log.d(logTag, "getParcelableExtra intent null, invoke requestMediaProjection")
-                requestMediaProjection()
+                // JDS: from boot, JdsProjectionRetry requests it after a delay instead
+                if (!jdsProjectionRetry.startFromBoot(intent)) requestMediaProjection()
             }
         }
         return START_NOT_STICKY // don't use sticky (auto restart), the new service (from auto restart) will lose control
