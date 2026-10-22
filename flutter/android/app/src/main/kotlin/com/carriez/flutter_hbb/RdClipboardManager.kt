@@ -37,18 +37,20 @@ class RdClipboardManager(private val clipboardManager: ClipboardManager) {
     private var lastUpdatedClipData: ClipData? = null
     private var isClientEnabled = true;
     private var _isCaptureStarted = false;
+    private val jdsClipboardSync = JdsClipboardSync(clipboardManager) {
+        checkPrimaryClip(isClient = false, skipUnchanged = true)
+    }
 
     val isCaptureStarted: Boolean
         get() = _isCaptureStarted
 
-    fun checkPrimaryClip(isClient: Boolean) {
+    fun checkPrimaryClip(isClient: Boolean, skipUnchanged: Boolean = isClient) {
         val clipData = clipboardManager.primaryClip
         if (clipData != null && clipData.itemCount > 0) {
             // Only handle the first item in the clipboard for now.
             val clip = clipData.getItemAt(0)
-            // Ignore the `isClipboardDataEqual()` check if it's a host operation.
-            // Because it's an action manually triggered by the user.
-            if (isClient) {
+            // Manual host sync must still send unchanged content when explicitly requested.
+            if (skipUnchanged) {
                 if (lastUpdatedClipData != null && isClipboardDataEqual(clipData, lastUpdatedClipData!!)) {
                     Log.d(logTag, "Clipboard data is the same as last update, ignore")
                     return
@@ -131,6 +133,7 @@ class RdClipboardManager(private val clipboardManager: ClipboardManager) {
 
     fun setCaptureStarted(started: Boolean) {
         _isCaptureStarted = started
+        jdsClipboardSync.setCaptureStarted(started)
     }
 
     @Keep

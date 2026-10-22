@@ -24,6 +24,9 @@
     <!-- Alternative screen capture authorisation route -->
     <uses-permission android:name="android.permission.CAPTURE_VIDEO_OUTPUT" />
 
+    <!-- Automatic clipboard sync while another app has focus (platform signature required) -->
+    <uses-permission android:name="android.permission.READ_CLIPBOARD_IN_BACKGROUND" />
+
     <application>
         <!-- JDS: provisioning receiver, declared here (not registered in MainService) so the
              PROVISION broadcast cold starts RustDesk even when nothing is running. The sender
