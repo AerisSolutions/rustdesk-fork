@@ -43,6 +43,8 @@ class JdsProvisioning : BroadcastReceiver() {
         JdsFFI.setOption("verification-method", "use-permanent-password")
         // disable the floating ui window that appears on the left middle
         JdsFFI.setLocalOption("disable-floating-window", "Y")
+        // don't check RustDesk's GitHub releases for updates on startup
+        JdsFFI.setLocalOption("enable-check-update", "N")
 
         // set permanent password per device; setPasswordAndGetId returns the RustDesk ID
         val password = intent.getStringExtra("provision_password").orEmpty()
