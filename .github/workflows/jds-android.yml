@@ -1,18 +1,15 @@
-# JDS: build one signed Android arm64 APK, platform signed with the chosen key.
-# Pick the key from the dropdown when running; run again for the other key.
+# JDS: builds RustDesk for Android arm64 (both platform keys), then publishes each as an update
+# channel: builds librustdesk.so once, then per key bumps the version, signs, hashes, writes
+# latest-rustdesk-android-<key>.json and uploads it with the APK to the update host.
+# Manual only - run it from Actions -> JDS Android build -> Run workflow.
 # Mirrors upstream's build-rustdesk-android job, trimmed to arm64 + our signing.
 name: JDS Android build
 
 on:
   workflow_dispatch:
-    inputs:
-      key:
-        description: "Platform signing key"
-        type: choice
-        default: b1a1812f
-        options:
-          - b1a1812f
-          - b4addb29
+
+permissions:
+  contents: read
 
 env:
   RUST_VERSION: "1.75"
@@ -25,27 +22,23 @@ env:
   PLATFORM_KEYSTORE_PASSWORD: android
   PLATFORM_KEY_ALIAS: platform
   PLATFORM_KEY_PASSWORD: android
+  # the version label becomes <RustDesk version>.<run number>, e.g. 1.5.1.7
+  # versionCode = this base + the run number. Must stay above the build number in pubspec.yaml
+  # (69 for 1.5.1) and any versionCode installed by hand, or devices won't see CI builds as newer
+  VERSION_CODE_BASE: 1000
+  UPDATE_HOST: "https://updates.sheriff.aerissolutions.com"
+  REMOTE_DIR: "/var/updates"
 
 jobs:
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
 
-  build-android:
+  # the Rust lib doesn't depend on the signing key, so it's built once and shared by every channel
+  build-lib:
     needs: [generate-bridge]
-    name: android arm64 (${{ inputs.key }})
-    runs-on: ubuntu-24.04
+    name: librustdesk.so (arm64)
+    runs-on: [self-hosted, linux, x64]
     steps:
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-        with:
-          tool-cache: false
-          android: false
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: false
-
       - name: Export GitHub Actions cache environment variables
         uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
         with:
@@ -55,30 +48,28 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-               clang cmake curl gcc-multilib git g++ g++-multilib \
+          PKGS="clang cmake curl gcc-multilib git g++ g++-multilib \
                libayatana-appindicator3-dev libasound2-dev libc6-dev libclang-dev \
                libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
                libgtk-3-dev libpam0g-dev libpulse-dev libva-dev libxcb-randr0-dev \
                libxcb-shape0-dev libxcb-xfixes0-dev libxdo-dev libxfixes-dev \
-               llvm-dev nasm ninja-build openjdk-17-jdk-headless pkg-config tree wget
+               llvm-dev nasm ninja-build openjdk-17-jdk-headless pkg-config tree wget \
+               libssl-dev"
+          # installed on the runner by hand (it can't sudo without a password); apt-get only runs if
+          # one is missing
+          MISSING=$(for p in $PKGS; do dpkg -s "$p" >/dev/null 2>&1 || echo "$p"; done | xargs)
+          if [ -n "$MISSING" ]; then
+            echo "Missing packages: $MISSING"
+            if ! { sudo -n apt-get update && sudo -n apt-get install -y $MISSING; }; then
+              echo "Install them on the runner machine: sudo apt-get install -y $MISSING"
+              exit 1
+            fi
+          fi
 
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
-
-      - name: Install flutter
-        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
-        with:
-          channel: "stable"
-          flutter-version: ${{ env.ANDROID_FLUTTER_VERSION }}
-
-      - name: Patch flutter
-        run: |
-          cd $(dirname $(dirname $(which flutter)))
-          [[ "3.24.5" == ${{env.ANDROID_FLUTTER_VERSION}} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
 
       - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
         id: setup-ndk
@@ -86,15 +77,23 @@ jobs:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: true
 
-      - name: Setup vcpkg with Github Actions binary cache
+      - name: Setup vcpkg
         uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
         with:
           vcpkgDirectory: /opt/artifacts/vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-          doNotCache: false
+          # vcpkg stays in /opt/artifacts/vcpkg on the runner
+          doNotCache: true
 
       - name: Install vcpkg dependencies
+        # ANDROID_NDK_HOME isn't set on the self-hosted runner, so it comes from setup-ndk
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
+          # keep vcpkg's built libraries in a folder on the runner
+          # (run-vcpkg points it at GitHub's cache by default)
+          mkdir -p /opt/artifacts/vcpkg-cache
+          export VCPKG_BINARY_SOURCES="clear;files,/opt/artifacts/vcpkg-cache,readwrite"
           if ! ./flutter/build_android_deps.sh arm64-v8a; then
             find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
               echo "$_1:"; echo "======"; cat "$_1"; echo "======"; echo ""
@@ -115,59 +114,186 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: "rustfmt"
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          prefix-key: rustdesk-lib-cache-android
-          key: aarch64-linux-android
-
       - name: Build rustdesk lib
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          # Rust's build folder lives outside the workspace (checkout wipes the workspace every run),
+          # so later runs only rebuild what changed
+          CARGO_TARGET_DIR: /opt/artifacts/cargo-target
+          # points bindgen's clang at the NDK's Android headers instead of the runner's Linux ones
+          # (cargo-ndk 3.1.2 only sets this with --bindgen, which ndk_arm64.sh doesn't pass)
+          BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android: >-
+            --sysroot=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+            -I${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android
         run: |
           rustup target add aarch64-linux-android
           cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
+          # build.rs generates src/version.rs, which checkout deletes; touching build.rs makes cargo
+          # rerun it even though the cached build folder says it's up to date
+          touch build.rs
           ./flutter/ndk_arm64.sh
           mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
-          cp ./target/aarch64-linux-android/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
-
-      - name: Decode platform keystore
-        run: |
-          if [ "${{ inputs.key }}" = "b1a1812f" ]; then
-            echo "${{ secrets.PLATFORM_KEYSTORE_B1A1812F_B64 }}" | base64 -d > "$GITHUB_WORKSPACE/platform.jks"
-          else
-            echo "${{ secrets.PLATFORM_KEYSTORE_B4ADDB29_B64 }}" | base64 -d > "$GITHUB_WORKSPACE/platform.jks"
-          fi
-          test -s "$GITHUB_WORKSPACE/platform.jks" || { echo "keystore secret missing/empty"; exit 1; }
-
-      - name: Build rustdesk APK (signed with the platform key)
-        shell: bash
-        env:
-          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          # consumed by jds.gradle's signingConfig
-          PLATFORM_KEYSTORE: ${{ github.workspace }}/platform.jks
-        run: |
-          export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
-          sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
-          # upstream's release signing config isn't set in CI; our jds.gradle supplies signing instead
-          sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
-          cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/
-          pushd flutter
-          flutter build apk --release --target-platform android-arm64 --split-per-abi
-          popd
-          mv flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk ./jds-android-${{ inputs.key }}.apk
-
-      - name: Upload APK
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: jds-android-${{ inputs.key }}
-          path: ./jds-android-${{ inputs.key }}.apk
+          cp "$CARGO_TARGET_DIR"/aarch64-linux-android/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
 
       - name: Upload librustdesk.so
         # the native lib on its own, so you can drop it into jniLibs/arm64-v8a locally and
         # repackage with a flutter-only build (no Rust rebuild) for Kotlin/Dart changes
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: jds-android-librustdesk-${{ inputs.key }}
+          name: librustdesk-android-arm64
           path: ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+
+  build-publish:
+    needs: [generate-bridge, build-lib]
+    name: android arm64 (${{ matrix.channel }})
+    runs-on: [self-hosted, linux, x64]
+    strategy:
+      fail-fast: false
+      # one job per platform key; both share the same versionCode (same run) so the two channels
+      # stay in lockstep. secret = the base64 keystore for that key, stored as a repo secret.
+      matrix:
+        include:
+          - { channel: b1a1812f, secret: PLATFORM_KEYSTORE_B1A1812F_B64 }
+          - { channel: b4addb29, secret: PLATFORM_KEYSTORE_B4ADDB29_B64 }
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      # app/build.gradle runs `cargo metadata` to find rustls-platform-verifier-android's files, so
+      # cargo has to be on the PATH
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.ANDROID_FLUTTER_VERSION }}
+
+      - name: Patch flutter
+        run: |
+          cd $(dirname $(dirname $(which flutter)))
+          PATCH=${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          # the self-hosted runner keeps Flutter between runs, so skip the patch if it's already applied
+          if git apply --reverse --check "$PATCH" 2>/dev/null; then
+            echo "Flutter already patched"
+          else
+            [[ "3.24.5" == ${{env.ANDROID_FLUTTER_VERSION}} ]] && git apply "$PATCH"
+          fi
+
+      # only needed for libc++_shared.so, which goes into the APK next to librustdesk.so
+      - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Restore librustdesk.so
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: librustdesk-android-arm64
+          path: ./flutter/android/app/src/main/jniLibs/arm64-v8a
+
+      - name: Compute version (shared by both channels)
+        run: |
+          echo "VERSION_CODE=$((VERSION_CODE_BASE + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=${VERSION}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      - name: Decode platform keystore
+        run: |
+          echo "${{ secrets[matrix.secret] }}" | base64 -d > "$RUNNER_TEMP/platform.jks"
+          test -s "$RUNNER_TEMP/platform.jks" || { echo "keystore secret ${{ matrix.secret }} missing/empty"; exit 1; }
+
+      - name: Build rustdesk APK (signed with the platform key)
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          # consumed by jds.gradle's signingConfig
+          PLATFORM_KEYSTORE: ${{ runner.temp }}/platform.jks
+        run: |
+          sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
+          # upstream's release signing config isn't set in CI; our jds.gradle supplies signing instead
+          sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
+          cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/
+          pushd flutter
+          # no --split-per-abi: with it Flutter adds 2000 to the arm64 versionCode, so the APK would
+          # no longer match the version_code written to the manifest
+          flutter build apk --release --target-platform android-arm64 \
+            --build-name "${{ env.VERSION_NAME }}" --build-number "${{ env.VERSION_CODE }}"
+          popd
+
+      - name: Package APK + write manifest
+        run: |
+          APK="rustdesk-client-android-${{ matrix.channel }}-${{ env.VERSION_NAME }}.apk"
+          cp flutter/build/app/outputs/flutter-apk/app-release.apk "$APK"
+          # stop if the APK's real versionCode isn't the one the manifest will advertise
+          AAPT2="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)aapt2"
+          CODE=$("$AAPT2" dump badging "$APK" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p")
+          [ "$CODE" = "${{ env.VERSION_CODE }}" ] || { echo "APK versionCode is '$CODE', expected ${{ env.VERSION_CODE }}"; exit 1; }
+          SHA=$(sha256sum "$APK" | awk '{print $1}')
+          cat > "latest-rustdesk-android-${{ matrix.channel }}.json" <<EOF
+          {
+            "version_code": ${{ env.VERSION_CODE }},
+            "version": "${{ env.VERSION_NAME }}",
+            "url": "${{ env.UPDATE_HOST }}/$APK",
+            "checksum": "$SHA"
+          }
+          EOF
+          echo "APK=$APK" >> "$GITHUB_ENV"
+          echo "Built $APK (sha256 $SHA)"
+
+      - name: Upload to update host (APK first, manifest last)
+        run: |
+          # DEPLOY_SSH_KEY is the AWS RSA private key (.pem) - scp uses it directly, no conversion
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > "$RUNNER_TEMP/deploy_key"
+          chmod 600 "$RUNNER_TEMP/deploy_key"
+          # IdentitiesOnly: use only this key. If an older RSA key is refused with "Permission denied
+          # (publickey)", add -o PubkeyAcceptedAlgorithms=+ssh-rsa to the line below
+          SCP="scp -i $RUNNER_TEMP/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          DEST="${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ env.REMOTE_DIR }}"
+          # APK first so a device polling mid-upload never sees a manifest pointing at a missing file
+          $SCP "$APK" "$DEST/"
+          $SCP "latest-rustdesk-android-${{ matrix.channel }}.json" "$DEST/"
+
+      - name: Keep the APK as a build artifact too
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-client-android-${{ matrix.channel }}-${{ env.VERSION_NAME }}
+          path: rustdesk-client-android-${{ matrix.channel }}-${{ env.VERSION_NAME }}.apk
+
+      - name: Remove temporary signing files
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/platform.jks" "$RUNNER_TEMP/deploy_key"
+
+# -----------------------------------------------------------------------------------------------
+# Repo secrets this workflow needs (Settings -> Secrets and variables -> Actions -> Secrets):
+#   PLATFORM_KEYSTORE_B1A1812F_B64   base64 of b1a1812f-platform.jks   (base64 -w0 the .jks)
+#   PLATFORM_KEYSTORE_B4ADDB29_B64   base64 of b4addb29-platform.jks
+#   DEPLOY_SSH_KEY                   the AWS RSA private key (.pem contents) for a user that can
+#                                    write to REMOTE_DIR - paste the whole file incl. BEGIN/END lines
+#   DEPLOY_HOST                      the EC2 public DNS / IP (or the update host in front of it)
+#   DEPLOY_USER                      the ssh user: "ubuntu" on Ubuntu AMIs, "ec2-user" on Amazon Linux
+# The keystore passwords are the public AOSP test-key value ("android"), so they're inline, not secret.
+# -----------------------------------------------------------------------------------------------
